@@ -1,0 +1,454 @@
+<!doctype html>
+<html class="dark" lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>StreamMaster Pro - Live Studio</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <div class="app-shell studio-shell">
+      <header class="studio-topbar">
+        <div class="brand">
+          <div class="brand-mark">S</div>
+          <div>
+            <strong>StreamMaster Pro</strong>
+          </div>
+        </div>
+        <div class="topbar-center">
+          <span class="material-symbols-outlined">search</span>
+          <span>Search studio</span>
+        </div>
+        <div class="topbar-actions">
+          <div class="status-strip">
+            <span id="liveTimer">00:00:00</span>
+            <span class="status-dot" id="statusDot"></span>
+            <span id="statusText">Ready</span>
+          </div>
+          <button class="material-button" id="studioSettingsBtn" title="Settings"><span class="material-symbols-outlined">settings</span></button>
+          <button class="material-button" title="Notifications"><span class="material-symbols-outlined">notifications</span></button>
+          <button id="liveBtn" class="go-live"><span data-icon="broadcast"></span>Go live</button>
+          <button class="profile-chip" id="profileMenuBtn" title="Account">SP</button>
+        </div>
+      </header>
+
+      <section class="auth-modal" id="authModal" aria-hidden="true">
+        <form class="auth-card" id="authForm">
+          <div class="auth-head">
+            <h2 id="authTitle">Sign in</h2>
+            <span>StreamMaster Pro</span>
+          </div>
+          <label class="field auth-name-field" id="authNameField" hidden>
+            <span>Name</span>
+            <input id="authName" autocomplete="name" value="Studio Producer">
+          </label>
+          <label class="field">
+            <span>Email</span>
+            <input id="authEmail" type="email" autocomplete="email" required placeholder="producer@example.com">
+          </label>
+          <label class="field">
+            <span>Password</span>
+            <input id="authPassword" type="password" autocomplete="current-password" required placeholder="Password">
+          </label>
+          <button id="authSubmitBtn" type="submit">Sign in</button>
+          <button id="authModeToggle" type="button">Create an account</button>
+        </form>
+      </section>
+
+      <main class="stage-area">
+        <header class="stage-heading">
+          <div class="stage-meta">
+            <span class="material-symbols-outlined">sensors</span>
+            <span>Program output</span>
+          </div>
+        </header>
+
+        <div class="stage-content">
+          <section class="guest-row">
+            <div class="section-title">
+              <h2>Backstage</h2>
+              <button id="copyInviteBtn"><span data-icon="link"></span></button>
+            </div>
+            <div class="guest-grid" id="guestGrid"></div>
+          </section>
+
+          <section class="program-wrap">
+            <canvas id="programCanvas" width="1280" height="720" aria-label="Program output"></canvas>
+            <div id="browserOverlayLayer" class="browser-overlay-layer"></div>
+            <div class="program-empty" id="programEmpty">
+              <strong>Add a camera, screen, media file, or guest</strong>
+              <span>Your live program output appears here in 16:9.</span>
+            </div>
+          </section>
+        </div>
+      </main>
+
+      <aside class="sidebar">
+        <div class="tools-header">
+          <span class="material-symbols-outlined">sensors</span>
+          <div>
+            <h2>Studio Tools</h2>
+          </div>
+        </div>
+
+        <nav class="tool-nav" aria-label="Studio panels">
+          <button class="nav-item active" data-panel="sources" title="Sources">
+            <span data-icon="sources"></span>
+            <span>Sources</span>
+          </button>
+          <button class="nav-item" data-panel="scenes" title="Scenes">
+            <span data-icon="scenes"></span>
+            <span>Scenes</span>
+          </button>
+          <button class="nav-item" data-panel="comments" title="Comments">
+            <span data-icon="comments"></span>
+            <span>Chat</span>
+          </button>
+          <button class="nav-item" data-panel="overlays" title="Overlays">
+            <span data-icon="overlays"></span>
+            <span>Banners</span>
+          </button>
+          <button class="nav-item" data-panel="brand" title="Brand">
+            <span data-icon="brand"></span>
+            <span>Brand</span>
+          </button>
+          <button class="nav-item" data-panel="destinations" title="Destinations">
+            <span data-icon="destinations"></span>
+            <span>Destinations</span>
+          </button>
+          <button class="nav-item" data-panel="recordings" title="Recordings">
+            <span data-icon="recordings"></span>
+            <span>Recordings</span>
+          </button>
+        </nav>
+
+        <section class="panel active" id="sources-panel">
+          <div class="panel-head">
+            <h2>Sources</h2>
+            <button class="icon-button" id="addGuestBtn" title="Add guest">
+              <span data-icon="user-plus"></span>
+            </button>
+          </div>
+          <div class="source-actions">
+            <button id="cameraBtn"><span data-icon="camera"></span>Camera</button>
+            <button id="screenBtn"><span data-icon="screen"></span>Screen</button>
+            <button id="mediaBtn"><span data-icon="image"></span>Media</button>
+            <button id="livekitJoinBtn"><span data-icon="video"></span>LiveKit room</button>
+            <input id="mediaInput" type="file" accept="image/*,video/*" hidden>
+          </div>
+          <p class="hint compact-hint" id="livekitStatus">LiveKit is ready to configure.</p>
+          <div class="source-list" id="sourceList"></div>
+          <div class="audio-mixer">
+            <div class="panel-head">
+              <h2>Audio Mixer</h2>
+            </div>
+            <div class="program-meter">
+              <span>Program audio</span>
+              <div class="meter-track"><div id="programAudioMeter" class="meter-fill"></div></div>
+            </div>
+            <div id="audioMixerList" class="audio-mixer-list"></div>
+          </div>
+          <div class="inspector" id="sourceInspector">
+            <h2>Guest identity</h2>
+            <label class="field">
+              <span>Name</span>
+              <input id="sourceNameInput" placeholder="Select a source">
+            </label>
+            <label class="field">
+              <span>Title</span>
+              <input id="sourceTitleInput" placeholder="Role, company, topic">
+            </label>
+            <button id="showGuestLowerBtn"><span data-icon="caption"></span>Show lower third</button>
+          </div>
+        </section>
+
+        <section class="panel" id="scenes-panel">
+          <div class="panel-head">
+            <h2>Scenes</h2>
+            <button class="icon-button" id="saveSceneBtn" title="Save scene">
+              <span data-icon="plus"></span>
+            </button>
+          </div>
+          <div class="scene-editor" id="sceneEditor" hidden>
+            <div class="panel-head">
+              <h2>Edit scene</h2>
+              <button class="icon-button" id="closeSceneEditorBtn" title="Close editor">
+                <span data-icon="trash"></span>
+              </button>
+            </div>
+            <label class="field">
+              <span>Scene name</span>
+              <input id="sceneEditName">
+            </label>
+            <label class="field">
+              <span>Layout</span>
+              <select id="sceneEditLayout">
+                <option value="grid">Grid</option>
+                <option value="spotlight">Spotlight</option>
+                <option value="sidebar">Sidebar</option>
+                <option value="pip">Picture in picture</option>
+              </select>
+            </label>
+            <div class="scene-picker-block">
+              <h2>Sources in scene</h2>
+              <div id="sceneSourcePicker" class="picker-list"></div>
+            </div>
+            <div class="scene-picker-block">
+              <h2>Overlays in scene</h2>
+              <div id="sceneOverlayPicker" class="picker-list"></div>
+            </div>
+            <button id="updateSceneBtn"><span data-icon="scenes"></span>Save scene changes</button>
+          </div>
+          <div class="scene-list" id="sceneList"></div>
+        </section>
+
+        <section class="panel" id="comments-panel">
+          <div class="panel-head">
+            <h2>Live chat</h2>
+            <button class="icon-button" id="simulateCommentBtn" title="Simulate comment">
+              <span data-icon="plus"></span>
+            </button>
+          </div>
+          <div class="comment-compose">
+            <label class="field">
+              <span>Author</span>
+              <input id="manualCommentAuthor" value="Viewer">
+            </label>
+            <label class="field">
+              <span>Comment</span>
+              <textarea id="manualCommentText" placeholder="Add a manual or test comment"></textarea>
+            </label>
+            <button id="addManualCommentBtn"><span data-icon="comments"></span>Add comment</button>
+          </div>
+          <div class="comment-list" id="commentList"></div>
+          <button id="clearCommentBtn"><span data-icon="eye"></span>Hide on stream</button>
+          <p class="hint compact-hint">Connect YouTube/Facebook OAuth later to receive real live comments.</p>
+        </section>
+
+        <section class="panel" id="overlays-panel">
+          <div class="panel-head">
+            <h2>Banners & overlays</h2>
+            <button class="icon-button" id="saveTickerPresetBtn" title="Save ticker">
+              <span data-icon="plus"></span>
+            </button>
+          </div>
+          <div class="overlay-compose">
+            <label class="field">
+              <span>Browser source name</span>
+              <input id="browserSourceName" value="Website overlay">
+            </label>
+            <label class="field">
+              <span>Browser source URL</span>
+              <input id="browserSourceUrl" placeholder="https://example.com/overlay.html">
+            </label>
+            <button id="addBrowserSourceBtn"><span data-icon="browser"></span>Save browser source</button>
+          </div>
+          <div class="template-strip" id="overlayTemplateList"></div>
+          <h2 class="panel-subhead">Saved overlays</h2>
+          <div class="overlay-list" id="overlayList"></div>
+          <p class="hint compact-hint">Browser sources render in preview. Server compositing is needed for cross-origin RTMP burn-in.</p>
+        </section>
+
+        <section class="panel" id="brand-panel">
+          <div class="panel-head">
+            <h2>Brand</h2>
+          </div>
+          <label class="field">
+            <span>Theme color</span>
+            <input type="color" id="accentColor" value="#00b894">
+          </label>
+          <label class="field">
+            <span>Logo text</span>
+            <input id="logoText" placeholder="Optional on-screen logo">
+          </label>
+          <label class="field">
+            <span>Lower third name</span>
+            <input id="lowerName" value="Alex Morgan">
+          </label>
+          <label class="field">
+            <span>Lower third title</span>
+            <input id="lowerTitle" value="Host and producer">
+          </label>
+          <label class="toggle">
+            <input type="checkbox" id="lowerToggle">
+            <span>Show lower third</span>
+          </label>
+          <label class="field">
+            <span>Ticker text</span>
+            <textarea id="tickerText">Welcome to the live studio - Subscribe for updates - Questions are open in chat</textarea>
+          </label>
+          <label class="toggle">
+            <input type="checkbox" id="tickerToggle">
+            <span>Show ticker</span>
+          </label>
+        </section>
+
+        <section class="panel" id="destinations-panel">
+          <div class="panel-head">
+            <h2>Destinations</h2>
+          </div>
+          <label class="field">
+            <span>RTMP URL</span>
+            <input id="rtmpUrl" placeholder="rtmp://server/live">
+          </label>
+          <label class="field">
+            <span>Stream key</span>
+            <input id="streamKey" type="password" placeholder="************">
+          </label>
+          <div class="destination-list">
+            <label class="toggle"><input type="checkbox" checked><span>YouTube</span></label>
+            <label class="toggle"><input type="checkbox"><span>Facebook</span></label>
+            <label class="toggle"><input type="checkbox"><span>Twitch</span></label>
+            <label class="toggle"><input type="checkbox"><span>LinkedIn</span></label>
+          </div>
+          <div class="relay-status-list" id="relayStatusList">
+            <p class="empty">Relay status appears here while live.</p>
+          </div>
+          <p class="hint compact-hint">Backend relay pushes the studio output to enabled RTMP destinations.</p>
+        </section>
+
+        <section class="panel" id="recordings-panel">
+          <div class="panel-head">
+            <h2>Recordings</h2>
+          </div>
+          <div id="recordingList" class="recording-list">
+            <p class="empty">No recordings yet.</p>
+          </div>
+        </section>
+
+        <section class="settings-drawer" id="settingsDrawer" aria-label="Studio settings" aria-hidden="true">
+          <div class="settings-head">
+            <h2>Studio Settings</h2>
+            <button class="icon-button" id="closeSettingsBtn" title="Close settings">
+              <span class="material-symbols-outlined">close</span>
+            </button>
+          </div>
+
+          <div class="settings-content">
+            <div class="settings-group">
+              <h3>Devices</h3>
+              <label class="field">
+                <span>Camera</span>
+                <select id="cameraDeviceSelect">
+                  <option value="">Default camera</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Microphone</span>
+                <select id="microphoneDeviceSelect">
+                  <option value="">Default microphone</option>
+                </select>
+              </label>
+              <button id="refreshDevicesBtn"><span data-icon="camera"></span>Refresh devices</button>
+            </div>
+
+            <div class="settings-group">
+              <h3>Stream Output</h3>
+              <label class="field">
+                <span>Resolution</span>
+                <select id="streamResolutionSelect">
+                  <option value="1280x720">720p HD</option>
+                  <option value="1920x1080">1080p Full HD</option>
+                  <option value="854x480">480p SD</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Frame rate</span>
+                <select id="streamFpsSelect">
+                  <option value="30">30 fps</option>
+                  <option value="24">24 fps</option>
+                  <option value="60">60 fps</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Video bitrate</span>
+                <select id="videoBitrateSelect">
+                  <option value="2500">2.5 Mbps</option>
+                  <option value="3500">3.5 Mbps</option>
+                  <option value="5000">5 Mbps</option>
+                  <option value="8000">8 Mbps</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Audio bitrate</span>
+                <select id="audioBitrateSelect">
+                  <option value="96">96 kbps</option>
+                  <option value="128">128 kbps</option>
+                  <option value="160">160 kbps</option>
+                  <option value="192">192 kbps</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="settings-group">
+              <h3>Audio Processing</h3>
+              <label class="toggle">
+                <input type="checkbox" id="echoCancellationToggle" checked>
+                <span>Echo cancellation</span>
+              </label>
+              <label class="toggle">
+                <input type="checkbox" id="noiseSuppressionToggle" checked>
+                <span>Noise suppression</span>
+              </label>
+              <label class="toggle">
+                <input type="checkbox" id="autoGainToggle" checked>
+                <span>Auto gain control</span>
+              </label>
+            </div>
+
+            <div class="settings-group">
+              <h3>Broadcast Behavior</h3>
+              <label class="toggle">
+                <input type="checkbox" id="autoRecordToggle">
+                <span>Record locally when going live</span>
+              </label>
+              <label class="toggle">
+                <input type="checkbox" id="relayReconnectToggle" checked>
+                <span>Reconnect RTMP relay automatically</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="settings-actions">
+            <button id="resetSettingsBtn">Reset</button>
+            <button id="saveSettingsBtn">Save settings</button>
+          </div>
+        </section>
+      </aside>
+
+      <nav class="control-deck">
+        <div class="layout-controls" aria-label="Layouts">
+          <button class="layout-btn active" data-layout="grid" title="Grid"><span data-icon="grid"></span></button>
+          <button class="layout-btn" data-layout="spotlight" title="Spotlight"><span data-icon="spotlight"></span></button>
+          <button class="layout-btn" data-layout="sidebar" title="Sidebar"><span data-icon="sidebar"></span></button>
+          <button class="layout-btn" data-layout="pip" title="Picture in picture"><span data-icon="pip"></span></button>
+        </div>
+        <div class="broadcast-actions">
+          <button id="muteBtn" title="Mute mic"><span data-icon="mic"></span><span>Mute</span></button>
+          <button id="recordBtn" class="record"><span data-icon="record"></span><span>Record</span></button>
+        </div>
+      </nav>
+    </div>
+
+    <template id="sourceTemplate">
+      <article class="source-card">
+        <div class="thumb"></div>
+        <div class="source-meta">
+          <strong></strong>
+          <span></span>
+        </div>
+        <div class="source-controls">
+          <button class="icon-button toggle-source" title="Show or hide"><span data-icon="eye"></span></button>
+          <button class="icon-button solo-source" title="Make primary"><span data-icon="star"></span></button>
+          <button class="icon-button remove-source" title="Remove"><span data-icon="trash"></span></button>
+        </div>
+      </article>
+    </template>
+
+    <script src="app.js"></script>
+  </body>
+</html>
