@@ -59,6 +59,34 @@
         </form>
       </section>
 
+      <section class="device-modal" id="deviceSetupModal" aria-hidden="true">
+        <form class="device-card" id="deviceSetupForm">
+          <div class="auth-head">
+            <h2>Choose your studio devices</h2>
+            <span>Your camera and audio choices will be remembered. You can change them later in settings.</span>
+          </div>
+          <label class="field">
+            <span>Camera</span>
+            <select id="setupCameraSelect">
+              <option value="">Default camera</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Microphone</span>
+            <select id="setupMicrophoneSelect">
+              <option value="">Default microphone</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Audio output</span>
+            <select id="setupAudioOutputSelect">
+              <option value="">Default speakers</option>
+            </select>
+          </label>
+          <button id="deviceSetupSubmitBtn" type="submit">Continue to studio</button>
+        </form>
+      </section>
+
       <main class="stage-area">
         <header class="stage-heading">
           <div class="stage-meta">
@@ -341,6 +369,12 @@
                 <span>Microphone</span>
                 <select id="microphoneDeviceSelect">
                   <option value="">Default microphone</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Audio output</span>
+                <select id="audioOutputDeviceSelect">
+                  <option value="">Default speakers</option>
                 </select>
               </label>
               <button id="refreshDevicesBtn"><span data-icon="camera"></span>Refresh devices</button>

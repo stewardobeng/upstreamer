@@ -935,7 +935,8 @@ body {
   font-weight: 700;
 }
 
-.auth-modal {
+.auth-modal,
+.device-modal {
   position: fixed;
   inset: 0;
   z-index: 20;
@@ -947,11 +948,13 @@ body {
   backdrop-filter: blur(12px);
 }
 
-.auth-modal.active {
+.auth-modal.active,
+.device-modal.active {
   display: flex;
 }
 
-.auth-card {
+.auth-card,
+.device-card {
   width: min(420px, 100%);
   padding: 18px;
   border: 1px solid var(--line);
@@ -976,7 +979,8 @@ body {
 }
 
 #authSubmitBtn,
-#authModeToggle {
+#authModeToggle,
+#deviceSetupSubmitBtn {
   display: inline-flex;
   width: 100%;
   min-height: 42px;
@@ -987,7 +991,8 @@ body {
   font-weight: 800;
 }
 
-#authSubmitBtn {
+#authSubmitBtn,
+#deviceSetupSubmitBtn {
   background: var(--accent-strong);
   color: #f1f0ff;
 }

@@ -74,6 +74,7 @@ const state = {
   settings: {
     cameraDeviceId: "",
     microphoneDeviceId: "",
+    audioOutputDeviceId: "",
     resolution: "1280x720",
     fps: 30,
     videoBitrate: 3500,
@@ -83,7 +84,8 @@ const state = {
     autoGainControl: true,
     autoRecord: false,
     relayReconnect: true,
-    settingsVersion: 3
+    deviceSetupComplete: false,
+    settingsVersion: 4
   },
   auth: null,
   chunks: [],
@@ -92,6 +94,9 @@ const state = {
 let authMode = "login";
 let authResolver = null;
 let authPromptPromise = null;
+let deviceSetupPromise = null;
+let hostCameraStartPromise = null;
+let backendSessionPromise = null;
 
 const canvas = document.querySelector("#programCanvas");
 const ctx = canvas.getContext("2d");
@@ -132,6 +137,7 @@ document.querySelector("#liveBtn").addEventListener("click", toggleLive);
 document.querySelector("#profileMenuBtn").addEventListener("click", logout);
 document.querySelector("#authForm").addEventListener("submit", submitAuthForm);
 document.querySelector("#authModeToggle").addEventListener("click", toggleAuthMode);
+document.querySelector("#deviceSetupForm").addEventListener("submit", submitDeviceSetupForm);
 document.querySelector("#studioSettingsBtn").addEventListener("click", openSettingsDrawer);
 document.querySelector("#closeSettingsBtn").addEventListener("click", closeSettingsDrawer);
 document.querySelector("#refreshDevicesBtn").addEventListener("click", populateDeviceSettings);
@@ -166,6 +172,28 @@ document.querySelectorAll(".layout-btn").forEach((button) => {
 });
 
 async function addCamera() {
+  await addCameraSource({
+    label: `Camera ${countKind("camera") + 1}`,
+    title: "Host"
+  });
+}
+
+async function startHostCameraSource() {
+  const existing = state.sources.find((source) => source.kind === "camera" && source.isHostCamera);
+  if (existing) return existing.id;
+  if (hostCameraStartPromise) return hostCameraStartPromise;
+  hostCameraStartPromise = addCameraSource({
+    label: "Host",
+    title: "Main presenter",
+    detail: "Local camera and mic",
+    isHostCamera: true
+  }).finally(() => {
+    hostCameraStartPromise = null;
+  });
+  return hostCameraStartPromise;
+}
+
+async function addCameraSource(options = {}) {
   try {
     const { width, height } = getSelectedResolution();
     const stream = await navigator.mediaDevices.getUserMedia({
@@ -182,19 +210,22 @@ async function addCamera() {
     video.muted = true;
     video.playsInline = true;
     await video.play();
-    addSource({
+    if (state.settings.audioOutputDeviceId) await applyAudioOutputDevice(video);
+    return addSource({
       kind: "camera",
-      label: `Camera ${countKind("camera") + 1}`,
-      title: "Host",
-      detail: "Local camera and mic",
+      label: options.label || `Camera ${countKind("camera") + 1}`,
+      title: options.title || "Host",
+      detail: options.detail || "Local camera and mic",
       element: video,
       stream,
       audioEnabled: true,
       volume: 1,
-      audioLevel: 0
+      audioLevel: 0,
+      isHostCamera: Boolean(options.isHostCamera)
     });
   } catch (error) {
     notify(`Camera could not start: ${error.message}`);
+    return null;
   }
 }
 
@@ -331,17 +362,32 @@ function getAudioConstraints() {
   };
 }
 
+async function applyAudioOutputDevice(mediaElement) {
+  if (!state.settings.audioOutputDeviceId || typeof mediaElement.setSinkId !== "function") return;
+  try {
+    await mediaElement.setSinkId(state.settings.audioOutputDeviceId);
+  } catch (error) {
+    notify(`Audio output could not be applied: ${error.message}`);
+  }
+}
+
+function persistStudioSettings() {
+  localStorage.setItem("streammaster.settings", JSON.stringify(state.settings));
+}
+
 function loadStudioSettings() {
   try {
     const saved = JSON.parse(localStorage.getItem("streammaster.settings") || "{}");
     state.settings = { ...state.settings, ...saved };
-    if (!saved.settingsVersion || saved.settingsVersion < 3) {
+    if (!saved.settingsVersion || saved.settingsVersion < 4) {
       state.settings.resolution = "1280x720";
       state.settings.fps = Math.min(Number(state.settings.fps) || 30, 30);
       state.settings.videoBitrate = Math.max(Number(state.settings.videoBitrate) || 3500, 3500);
       state.settings.audioBitrate = Math.max(Number(state.settings.audioBitrate) || 128, 128);
-      state.settings.settingsVersion = 3;
-      localStorage.setItem("streammaster.settings", JSON.stringify(state.settings));
+      state.settings.audioOutputDeviceId ||= "";
+      state.settings.deviceSetupComplete = Boolean(saved.deviceSetupComplete);
+      state.settings.settingsVersion = 4;
+      persistStudioSettings();
     }
   } catch {
     // Keep defaults if local storage is unavailable.
@@ -361,6 +407,10 @@ function syncSettingsForm() {
   };
   setValue("#cameraDeviceSelect", state.settings.cameraDeviceId);
   setValue("#microphoneDeviceSelect", state.settings.microphoneDeviceId);
+  setValue("#audioOutputDeviceSelect", state.settings.audioOutputDeviceId);
+  setValue("#setupCameraSelect", state.settings.cameraDeviceId);
+  setValue("#setupMicrophoneSelect", state.settings.microphoneDeviceId);
+  setValue("#setupAudioOutputSelect", state.settings.audioOutputDeviceId);
   setValue("#streamResolutionSelect", state.settings.resolution);
   setValue("#streamFpsSelect", state.settings.fps);
   setValue("#videoBitrateSelect", state.settings.videoBitrate);
@@ -377,6 +427,7 @@ function readSettingsForm() {
     ...state.settings,
     cameraDeviceId: document.querySelector("#cameraDeviceSelect").value,
     microphoneDeviceId: document.querySelector("#microphoneDeviceSelect").value,
+    audioOutputDeviceId: document.querySelector("#audioOutputDeviceSelect").value,
     resolution: document.querySelector("#streamResolutionSelect").value,
     fps: Number(document.querySelector("#streamFpsSelect").value || 30),
     videoBitrate: Number(document.querySelector("#videoBitrateSelect").value || 3500),
@@ -386,7 +437,7 @@ function readSettingsForm() {
     autoGainControl: document.querySelector("#autoGainToggle").checked,
     autoRecord: document.querySelector("#autoRecordToggle").checked,
     relayReconnect: document.querySelector("#relayReconnectToggle").checked,
-    settingsVersion: 3
+    settingsVersion: 4
   };
 }
 
@@ -409,14 +460,106 @@ async function populateDeviceSettings() {
     const devices = await navigator.mediaDevices.enumerateDevices();
     renderDeviceOptions("#cameraDeviceSelect", devices.filter((device) => device.kind === "videoinput"), "Default camera", "Camera");
     renderDeviceOptions("#microphoneDeviceSelect", devices.filter((device) => device.kind === "audioinput"), "Default microphone", "Microphone");
+    renderDeviceOptions("#audioOutputDeviceSelect", devices.filter((device) => device.kind === "audiooutput"), "Default speakers", "Speakers");
     syncSettingsForm();
   } catch (error) {
     notify(`Could not list devices: ${error.message}`);
   }
 }
 
+async function populateDeviceSetupOptions() {
+  if (!navigator.mediaDevices?.enumerateDevices) {
+    notify("Media device selection is not supported in this browser.");
+    return;
+  }
+
+  try {
+    await navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then((stream) => {
+      stream.getTracks().forEach((track) => track.stop());
+    });
+  } catch (error) {
+    notify(`Device permission is needed to continue: ${error.message}`);
+  }
+
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    renderDeviceOptions("#setupCameraSelect", devices.filter((device) => device.kind === "videoinput"), "Default camera", "Camera");
+    renderDeviceOptions("#setupMicrophoneSelect", devices.filter((device) => device.kind === "audioinput"), "Default microphone", "Microphone");
+    renderDeviceOptions("#setupAudioOutputSelect", devices.filter((device) => device.kind === "audiooutput"), "Default speakers", "Speakers");
+    syncSettingsForm();
+  } catch (error) {
+    notify(`Could not list devices: ${error.message}`);
+  }
+}
+
+async function ensureHostDeviceSetup() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    notify("Camera and microphone access is not supported in this browser.");
+    return;
+  }
+  if (state.settings.deviceSetupComplete) {
+    const sourceId = await startHostCameraSource();
+    if (sourceId) return;
+    state.settings.deviceSetupComplete = false;
+    persistStudioSettings();
+  }
+  if (deviceSetupPromise) return deviceSetupPromise;
+  deviceSetupPromise = showDeviceSetupModal().finally(() => {
+    deviceSetupPromise = null;
+  });
+  return deviceSetupPromise;
+}
+
+async function showDeviceSetupModal() {
+  const modal = document.querySelector("#deviceSetupModal");
+  const submit = document.querySelector("#deviceSetupSubmitBtn");
+  modal.classList.add("active");
+  modal.setAttribute("aria-hidden", "false");
+  submit.disabled = true;
+  submit.textContent = "Finding devices...";
+  await populateDeviceSetupOptions();
+  submit.disabled = false;
+  submit.textContent = "Continue to studio";
+
+  return new Promise((resolve) => {
+    modal.dataset.pending = "true";
+    modal._resolveDeviceSetup = resolve;
+  });
+}
+
+async function submitDeviceSetupForm(event) {
+  event.preventDefault();
+  const submit = document.querySelector("#deviceSetupSubmitBtn");
+  submit.disabled = true;
+  submit.textContent = "Starting camera...";
+  state.settings = {
+    ...state.settings,
+    cameraDeviceId: document.querySelector("#setupCameraSelect").value,
+    microphoneDeviceId: document.querySelector("#setupMicrophoneSelect").value,
+    audioOutputDeviceId: document.querySelector("#setupAudioOutputSelect").value,
+    deviceSetupComplete: false,
+    settingsVersion: 4
+  };
+  syncSettingsForm();
+  persistStudioSettings();
+  const sourceId = await startHostCameraSource();
+  submit.disabled = false;
+  submit.textContent = "Continue to studio";
+  if (!sourceId) return;
+  state.settings.deviceSetupComplete = true;
+  persistStudioSettings();
+  const modal = document.querySelector("#deviceSetupModal");
+  modal.classList.remove("active");
+  modal.setAttribute("aria-hidden", "true");
+  const resolve = modal._resolveDeviceSetup;
+  modal._resolveDeviceSetup = null;
+  delete modal.dataset.pending;
+  resolve?.();
+}
+
 function renderDeviceOptions(selector, devices, defaultLabel, fallbackLabel) {
   const select = document.querySelector(selector);
+  if (!select) return;
   const current = select.value;
   select.innerHTML = `<option value="">${defaultLabel}</option>`;
   devices.forEach((device, index) => {
@@ -439,10 +582,25 @@ function closeSettingsDrawer() {
   document.querySelector("#settingsDrawer").setAttribute("aria-hidden", "true");
 }
 
-function saveStudioSettings() {
+async function saveStudioSettings() {
+  const previousCameraDeviceId = state.settings.cameraDeviceId;
+  const previousMicrophoneDeviceId = state.settings.microphoneDeviceId;
   readSettingsForm();
   applyStudioSettings();
-  localStorage.setItem("streammaster.settings", JSON.stringify(state.settings));
+  state.settings.deviceSetupComplete = true;
+  persistStudioSettings();
+  const hostSource = state.sources.find((source) => source.kind === "camera" && source.isHostCamera);
+  const hostDeviceChanged = hostSource && (
+    previousCameraDeviceId !== state.settings.cameraDeviceId ||
+    previousMicrophoneDeviceId !== state.settings.microphoneDeviceId
+  );
+  if (hostDeviceChanged) {
+    removeSource(hostSource.id);
+    await startHostCameraSource();
+  }
+  state.sources.forEach((source) => {
+    if (source.element instanceof HTMLMediaElement) applyAudioOutputDevice(source.element);
+  });
   notify("Studio settings saved");
 }
 
@@ -461,7 +619,9 @@ function resetStudioSettings() {
     autoGainControl: true,
     autoRecord: false,
     relayReconnect: true,
-    settingsVersion: 3
+    audioOutputDeviceId: "",
+    deviceSetupComplete: false,
+    settingsVersion: 4
   };
   syncSettingsForm();
   applyStudioSettings();
@@ -993,12 +1153,24 @@ function toggleRecord() {
 }
 
 async function ensureBackendSession() {
-  if (state.auth?.token) return state.auth;
+  if (backendSessionPromise) return backendSessionPromise;
+  backendSessionPromise = ensureBackendSessionOnce().finally(() => {
+    backendSessionPromise = null;
+  });
+  return backendSessionPromise;
+}
+
+async function ensureBackendSessionOnce() {
+  if (state.auth?.token) {
+    await ensureHostDeviceSetup();
+    return state.auth;
+  }
   const saved = localStorage.getItem("streamdeck-auth");
   if (saved) {
     try {
       state.auth = JSON.parse(saved);
       await validateSession();
+      await ensureHostDeviceSetup();
       return state.auth;
     } catch {
       localStorage.removeItem("streamdeck-auth");
@@ -1009,6 +1181,7 @@ async function ensureBackendSession() {
   state.auth = await showAuthModal();
   localStorage.setItem("streamdeck-auth", JSON.stringify(state.auth));
   updateProfileChip();
+  await ensureHostDeviceSetup();
   return state.auth;
 }
 
@@ -1095,8 +1268,8 @@ async function submitAuthForm(event) {
     state.auth = data;
     localStorage.setItem("streamdeck-auth", JSON.stringify(data));
     updateProfileChip();
-    hideAuthModal();
     authResolver?.(data);
+    hideAuthModal();
     notify(authMode === "register" ? "Account created" : "Signed in");
   } catch (error) {
     notify(error.message);
@@ -2248,7 +2421,6 @@ draw();
 updateTimer();
 loadStudioSettings();
 populateDeviceSettings();
-addGuestPlaceholder({ label: "Host", title: "Main presenter", detail: "Host placeholder", initials: "H" });
 initLiveKitStatus();
 loadDestinations();
 loadScenes();
