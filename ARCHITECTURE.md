@@ -8,11 +8,13 @@ Current implementation:
 
 - Frontend: plain HTML, CSS, and browser media APIs.
 - Backend API: Node.js, Express.
-- Realtime ingest: WebSocket.
+- Realtime ingest: WebSocket source/control feed.
+- Backend compositing: headless Chromium renders the program canvas.
 - LiveKit readiness: token endpoints and frontend room connection hooks.
 - RTMP relay: FFmpeg.
 - Local persistence: JSON file database in `data/db.json`.
 - Local assets and recordings: `uploads/` and `recordings/`.
+- Docker deployment: Node.js, Chromium, FFmpeg, and optional PostgreSQL service.
 
 Professional production target:
 
@@ -38,6 +40,8 @@ Professional production target:
 - Scene preset endpoints at `/api/scenes`.
 - Comment moderation endpoints at `/api/comments`.
 - WebSocket ingest endpoint at `/ingest`.
+- Backend compositor ingest endpoint at `/source-ingest`.
+- Backend program renderer at `/backend-program/:showId`.
 - LiveKit config endpoint at `/api/livekit/config`.
 - Host LiveKit token endpoint at `/api/livekit/token`.
 - Guest LiveKit token endpoint at `/api/livekit/guest-token`.
@@ -78,11 +82,30 @@ Browsers cannot directly publish RTMP streams to YouTube, Twitch, Facebook, or L
 
 ```text
 Browser studio
-  -> WebSocket/WebRTC/WHIP ingest
-  -> backend media worker
+  -> source/control WebSocket feed
+  -> backend Chromium compositor
   -> FFmpeg or media server
   -> RTMP/SRT destinations
 ```
+
+The current backend compositor is designed for VPS deployment. Once Go Live starts, the server keeps a headless Chromium renderer and FFmpeg relay alive. This reduces dependence on the visible browser tab and avoids RTMP publishing directly from the user's machine.
+
+## Docker Deployment Target
+
+The included Docker setup installs Node.js, Chromium, and FFmpeg in one app container, plus PostgreSQL for the migration path:
+
+```text
+docker compose up -d --build
+```
+
+Production VPS requirements:
+
+- HTTPS reverse proxy such as Nginx or Caddy.
+- Persistent volumes for `data/`, `uploads/`, and `recordings/`.
+- Strong `JWT_SECRET`.
+- Correct RTMP destination URLs and stream keys.
+- CPU headroom for Chromium compositing and FFmpeg encoding.
+- Monitoring for FFmpeg exits, bitrate drops, and source feed timeouts.
 
 ## Remaining Work For A Professional Platform
 

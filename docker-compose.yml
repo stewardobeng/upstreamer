@@ -1,0 +1,33 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PORT: ${PORT:-8088}
+      CHROME_PATH: /usr/bin/chromium
+      FFMPEG_PATH: ffmpeg
+      DATABASE_URL: postgres://streammaster:${POSTGRES_PASSWORD:-streammaster}@postgres:5432/streammaster
+    ports:
+      - "${PORT:-8088}:8088"
+    volumes:
+      - ./data:/app/data
+      - ./uploads:/app/uploads
+      - ./recordings:/app/recordings
+    depends_on:
+      - postgres
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: streammaster
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-streammaster}
+      POSTGRES_DB: streammaster
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./database.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+
+volumes:
+  postgres-data:

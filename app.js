@@ -55,6 +55,14 @@ const state = {
   liveRecorder: null,
   ingestSocket: null,
   liveFrameTimer: null,
+  liveDataRequestTimer: null,
+  liveFramePumpTimer: null,
+  sourceFeedSocket: null,
+  sourceFeedTimer: null,
+  programStateTimer: null,
+  liveHeartbeatTimer: null,
+  liveWakeLock: null,
+  sourceFrameCallbacks: [],
   currentShow: null,
   livekitRoom: null,
   livekitConnected: false,
@@ -161,6 +169,10 @@ document.querySelector("#sourceTitleInput").addEventListener("input", updateSele
 document.querySelector("#showGuestLowerBtn").addEventListener("click", showSelectedSourceLowerThird);
 document.querySelector("#accentColor").addEventListener("input", (event) => {
   document.documentElement.style.setProperty("--accent", event.target.value);
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (state.live && !document.hidden) acquireLiveWakeLock();
 });
 
 document.querySelectorAll(".layout-btn").forEach((button) => {
@@ -2116,17 +2128,22 @@ function startAudioMeters() {
 async function startLiveBroadcast() {
   await saveDestinationFromForm();
   const show = await ensureShow();
-  const { ingestUrl } = await api(`/api/broadcasts/${show.id}/start`, {
-    method: "POST",
-    body: JSON.stringify({ relayReconnect: state.settings.relayReconnect })
-  });
   applyStudioSettings();
   const targetFps = Math.min(Math.max(Number(state.settings.fps) || 30, 24), 30);
   const videoBitrate = Math.min(Math.max(Number(state.settings.videoBitrate) || 3500, 3500), 4500);
   const audioBitrate = Math.min(Math.max(Number(state.settings.audioBitrate) || 128, 96), 192);
-  const wsUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${ingestUrl}&format=webm&fps=${targetFps}&vbitrate=${videoBitrate}&abitrate=${audioBitrate}`;
+  const { sourceIngestUrl } = await api(`/api/broadcasts/${show.id}/start`, {
+    method: "POST",
+    body: JSON.stringify({
+      mode: "backend-compositor",
+      relayReconnect: state.settings.relayReconnect,
+      fps: targetFps,
+      videoBitrate,
+      audioBitrate
+    })
+  });
+  const wsUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${sourceIngestUrl}`;
   const socket = new WebSocket(wsUrl);
-  socket.binaryType = "blob";
 
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("Live ingest connection timed out.")), 8000);
@@ -2140,74 +2157,168 @@ async function startLiveBroadcast() {
     };
   });
 
-  let chunksSent = 0;
   state.liveBytesSent = 0;
   state.lastLiveChunkAt = Date.now();
   state.live = true;
+  await acquireLiveWakeLock();
   startBrowserSnapshotLoop();
-  state.liveFrameEncoding = false;
-  state.liveLastFrameAt = 0;
-  state.liveFrameDrops = 0;
-  logClientEvent("live.webmIngest.started", { settings: state.settings, targetFps, videoBitrate, audioBitrate });
-
-  const programStream = canvas.captureStream(targetFps);
-  state.programVideoTrack = programStream.getVideoTracks()[0] || null;
-  const audioStream = createMixedAudioStream();
-  audioStream.getAudioTracks().forEach((track) => programStream.addTrack(track));
-
-  const mimeType = pickMimeType();
-  const recorder = new MediaRecorder(programStream, {
-    ...getRecorderOptions(mimeType),
-    videoBitsPerSecond: videoBitrate * 1000,
-    audioBitsPerSecond: audioBitrate * 1000
-  });
-  recorder.ondataavailable = (event) => {
-    if (event.data.size && socket.readyState === WebSocket.OPEN) {
-      chunksSent += 1;
-      state.liveBytesSent += event.data.size;
-      state.lastLiveChunkAt = Date.now();
-      socket.send(event.data);
-      if (chunksSent <= 5 || chunksSent % 20 === 0) {
-        logClientEvent("live.webm.chunk", { chunksSent, size: event.data.size, total: state.liveBytesSent });
-      }
-    }
-  };
-  recorder.onerror = (event) => logClientEvent("live.webmRecorder.error", { message: event.error?.message || "unknown error" });
-  recorder.onstart = () => logClientEvent("live.webmRecorder.started", { mimeType: recorder.mimeType });
-  recorder.onstop = () => logClientEvent("live.webmRecorder.stopped");
-  recorder.start(250);
-  state.liveChunkWatchTimer = setInterval(() => {
-    if (!state.live) return;
-    const elapsed = Date.now() - (state.lastLiveChunkAt || Date.now());
-    if (elapsed > 20000) {
-      logClientEvent("live.chunk.delayed", {
-        msSinceLastChunk: elapsed,
-        total: state.liveBytesSent,
-        frameDrops: state.liveFrameDrops
-      });
-      notify("Live media chunks are delayed. Keeping the relay open while the browser catches up.");
-    }
-  }, 5000);
-  setTimeout(() => {
-    if (state.live && chunksSent === 0) {
-      notify("No frames are leaving the browser. Check whether the program canvas is available.");
-    }
-  }, 3500);
-  state.ingestSocket = socket;
-  state.liveRecorder = recorder;
+  state.sourceFeedSocket = socket;
+  logClientEvent("live.backendCompositor.started", { settings: state.settings, targetFps, videoBitrate, audioBitrate });
+  startBackendSourceFeed(socket, targetFps);
   state.startedAt = Date.now();
   if (state.settings.autoRecord && !state.recording) toggleRecord();
   pollBroadcastStatus();
   socket.onclose = () => {
-    logClientEvent("live.socket.closed", { framesSent: chunksSent, total: state.liveBytesSent, drops: state.liveFrameDrops });
+    logClientEvent("live.sourceSocket.closed", { total: state.liveBytesSent });
     if (state.live) stopLiveBroadcast(false);
   };
   updateLiveUi();
 }
 
+function startBackendSourceFeed(socket, targetFps) {
+  const frameCanvas = document.createElement("canvas");
+  frameCanvas.width = 640;
+  frameCanvas.height = 360;
+  const frameCtx = frameCanvas.getContext("2d", { alpha: false });
+  const sourceInterval = Math.max(80, Math.round(1000 / Math.min(targetFps, 12)));
+  let lastSourceFrameAt = 0;
+
+  const send = (payload) => {
+    if (socket.readyState !== WebSocket.OPEN) return;
+    const text = JSON.stringify(payload);
+    state.liveBytesSent += text.length;
+    state.lastLiveChunkAt = Date.now();
+    socket.send(text);
+  };
+
+  const sendProgramState = () => {
+    const activeOverlays = state.overlays
+      .filter((overlay) => overlay.enabled)
+      .map((overlay) => ({
+        id: overlay.id,
+        type: overlay.type,
+        name: overlay.name,
+        enabled: overlay.enabled,
+        text: overlay.config?.text || overlay.name,
+        frame: overlay.type === "browser" ? getBrowserOverlayDataUrl(overlay.id) : ""
+      }));
+    send({
+      type: "program-state",
+      state: {
+        layout: state.layout,
+        overlays: activeOverlays,
+        ticker: {
+          enabled: document.querySelector("#tickerToggle")?.checked,
+          text: document.querySelector("#tickerText")?.value || ""
+        },
+        brand: {
+          logo: document.querySelector("#logoText")?.value || "LIVE",
+          accent: getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#bbc3ff"
+        },
+        lowerThird: {
+          enabled: document.querySelector("#lowerToggle")?.checked,
+          name: document.querySelector("#lowerName")?.value || "",
+          title: document.querySelector("#lowerTitle")?.value || ""
+        },
+        comment: state.activeComment
+      }
+    });
+  };
+
+  const sendSourceFrames = () => {
+    const now = Date.now();
+    if (now - lastSourceFrameAt < sourceInterval * 0.75) return;
+    lastSourceFrameAt = now;
+    const sources = getOrderedVisibleSources();
+    sources.forEach((source) => {
+      try {
+        frameCtx.fillStyle = "#050708";
+        frameCtx.fillRect(0, 0, frameCanvas.width, frameCanvas.height);
+        const sourceW = source.element.videoWidth || source.element.naturalWidth || source.element.width || 16;
+        const sourceH = source.element.videoHeight || source.element.naturalHeight || source.element.height || 9;
+        const scale = Math.max(frameCanvas.width / sourceW, frameCanvas.height / sourceH);
+        const drawW = sourceW * scale;
+        const drawH = sourceH * scale;
+        frameCtx.drawImage(source.element, (frameCanvas.width - drawW) / 2, (frameCanvas.height - drawH) / 2, drawW, drawH);
+        send({
+          type: "source-frame",
+          id: source.id,
+          label: source.label,
+          kind: source.kind,
+          visible: source.visible,
+          frame: frameCanvas.toDataURL("image/jpeg", 0.72)
+        });
+      } catch {
+        // A source may be temporarily unavailable while a camera or media file starts.
+      }
+    });
+  };
+
+  sendProgramState();
+  sendSourceFrames();
+  state.programStateTimer = setInterval(sendProgramState, 500);
+  state.sourceFeedTimer = setInterval(sendSourceFrames, sourceInterval);
+  state.liveHeartbeatTimer = setInterval(() => {
+    send({ type: "heartbeat", hidden: document.hidden, at: Date.now() });
+  }, 3000);
+  startVideoFrameCallbacks(sendSourceFrames);
+}
+
+function startVideoFrameCallbacks(sendSourceFrames) {
+  state.sourceFrameCallbacks.forEach(({ element, id }) => element.cancelVideoFrameCallback?.(id));
+  state.sourceFrameCallbacks = [];
+  const schedule = (element) => {
+    if (!state.live || typeof element.requestVideoFrameCallback !== "function") return;
+    const id = element.requestVideoFrameCallback(() => {
+      state.sourceFrameCallbacks = state.sourceFrameCallbacks.filter((item) => item.id !== id);
+      sendSourceFrames();
+      schedule(element);
+    });
+    state.sourceFrameCallbacks.push({ element, id });
+  };
+  getOrderedVisibleSources()
+    .map((source) => source.element)
+    .filter((element) => element instanceof HTMLVideoElement)
+    .forEach(schedule);
+}
+
+async function acquireLiveWakeLock() {
+  if (!("wakeLock" in navigator) || state.liveWakeLock) return;
+  try {
+    state.liveWakeLock = await navigator.wakeLock.request("screen");
+    state.liveWakeLock.addEventListener("release", () => {
+      state.liveWakeLock = null;
+    });
+  } catch (error) {
+    logClientEvent("live.wakeLock.unavailable", { error: error.message });
+  }
+}
+
+async function releaseLiveWakeLock() {
+  const wakeLock = state.liveWakeLock;
+  state.liveWakeLock = null;
+  await wakeLock?.release?.().catch(() => {});
+}
+
+function getBrowserOverlayDataUrl(overlayId) {
+  const imageState = state.browserOverlayImages.get(overlayId);
+  if (!imageState?.image || !imageState.loaded) return "";
+  const overlayCanvas = document.createElement("canvas");
+  overlayCanvas.width = 1280;
+  overlayCanvas.height = 720;
+  const overlayCtx = overlayCanvas.getContext("2d");
+  try {
+    overlayCtx.drawImage(imageState.image, 0, 0, overlayCanvas.width, overlayCanvas.height);
+    return overlayCanvas.toDataURL("image/png");
+  } catch {
+    return "";
+  }
+}
+
 async function stopLiveBroadcast(callServer = true) {
   const showId = state.currentShow?.id;
   state.live = false;
+  await releaseLiveWakeLock();
   startBrowserSnapshotLoop();
   state.startedAt = null;
   if (state.liveRecorder && state.liveRecorder.state !== "inactive") {
@@ -2219,10 +2330,26 @@ async function stopLiveBroadcast(callServer = true) {
   if (state.ingestSocket && state.ingestSocket.readyState === WebSocket.OPEN) {
     state.ingestSocket.close();
   }
+  if (state.sourceFeedSocket && state.sourceFeedSocket.readyState === WebSocket.OPEN) {
+    state.sourceFeedSocket.close();
+  }
   state.liveRecorder = null;
   state.ingestSocket = null;
+  state.sourceFeedSocket = null;
   if (state.liveFrameTimer) cancelAnimationFrame(state.liveFrameTimer);
   state.liveFrameTimer = null;
+  if (state.liveDataRequestTimer) clearInterval(state.liveDataRequestTimer);
+  state.liveDataRequestTimer = null;
+  if (state.liveFramePumpTimer) clearInterval(state.liveFramePumpTimer);
+  state.liveFramePumpTimer = null;
+  if (state.sourceFeedTimer) clearInterval(state.sourceFeedTimer);
+  state.sourceFeedTimer = null;
+  if (state.programStateTimer) clearInterval(state.programStateTimer);
+  state.programStateTimer = null;
+  if (state.liveHeartbeatTimer) clearInterval(state.liveHeartbeatTimer);
+  state.liveHeartbeatTimer = null;
+  state.sourceFrameCallbacks.forEach(({ element, id }) => element.cancelVideoFrameCallback?.(id));
+  state.sourceFrameCallbacks = [];
   state.liveFrameEncoding = false;
   state.liveLastFrameAt = 0;
   if (state.statusPollTimer) clearTimeout(state.statusPollTimer);
@@ -2280,7 +2407,9 @@ function renderRelayStatus(status) {
       </article>`).join("")
     : '<p class="empty">Live ingest is active, but no enabled RTMP destinations were found.</p>';
   const bytes = Math.max(status.bytesIn || 0, state.liveBytesSent || 0);
-  list.innerHTML = `<article class="relay-card"><strong>Ingest: ${escapeHtml(status.status)}</strong><span>${formatBytes(bytes)} sent from browser</span></article>${relayHtml}`;
+  const modeLabel = status.mode === "backend-compositor" ? "Backend compositor" : "Browser ingest";
+  const byteLabel = status.mode === "backend-compositor" ? "source feed/control data received" : "sent from browser";
+  list.innerHTML = `<article class="relay-card"><strong>${escapeHtml(modeLabel)}: ${escapeHtml(status.status)}</strong><span>${formatBytes(bytes)} ${byteLabel}</span></article>${relayHtml}`;
 }
 
 function pickMimeType() {

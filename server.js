@@ -34,7 +34,9 @@ const upload = multer({ dest: UPLOAD_DIR });
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
+const sourceWss = new WebSocketServer({ noServer: true });
 const activeBroadcasts = new Map();
+const SOURCE_STALL_MS = 10000;
 let browserRenderer = null;
 const browserPages = new Map();
 const browserPagePromises = new Map();
@@ -722,6 +724,26 @@ app.post("/api/broadcasts/:showId/start", auth, (req, res) => {
   show.updatedAt = now();
   writeDb(db);
   logEvent("broadcast.start.requested", { showId: show.id, ownerId: req.user.id });
+  if (req.body.mode === "backend-compositor") {
+    const destinations = db.destinations.filter((item) => item.ownerId === req.user.id && item.enabled);
+    const fps = Math.min(Math.max(Number(req.body.fps) || 30, 5), 30);
+    const videoBitrate = Math.min(Math.max(Number(req.body.videoBitrate) || 3500, 1500), 6000);
+    const audioBitrate = Math.min(Math.max(Number(req.body.audioBitrate) || 128, 64), 256);
+    const broadcast = startBackendCompositorBroadcast({
+      show,
+      ownerId: req.user.id,
+      destinations,
+      fps,
+      videoBitrate,
+      audioBitrate
+    });
+    activeBroadcasts.set(show.id, broadcast);
+    return res.json({
+      mode: "backend-compositor",
+      sourceIngestUrl: `/source-ingest?token=${jwt.sign({ sub: req.user.id, showId: show.id }, JWT_SECRET, { expiresIn: "6h" })}`,
+      show
+    });
+  }
   res.json({
     ingestUrl: `/ingest?token=${jwt.sign({ sub: req.user.id, showId: show.id }, JWT_SECRET, { expiresIn: "6h" })}`,
     show
@@ -754,6 +776,39 @@ app.get("/api/broadcasts/:showId/status", auth, (req, res) => {
   }
 
   res.json({ status: "idle" });
+});
+
+app.get("/backend-program/:showId", (req, res) => {
+  const broadcast = activeBroadcasts.get(req.params.showId);
+  if (!broadcast || broadcast.mode !== "backend-compositor" || req.query.token !== broadcast.renderToken) {
+    return res.status(404).send("Program renderer is not available.");
+  }
+  res.type("html").send(`<!doctype html>
+<html><head><meta charset="utf-8"><style>
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#050708}
+canvas{display:block;width:100vw;height:100vh;background:#050708}
+</style></head><body><canvas id="program" width="1280" height="720"></canvas>
+<script>
+const canvas=document.getElementById('program');
+const ctx=canvas.getContext('2d');
+let state={layout:'grid',sources:[],overlays:[],ticker:{enabled:false,text:''},brand:{logo:'LIVE',accent:'#bbc3ff'},lowerThird:null,comment:null};
+const images=new Map();
+function roundRect(x,y,w,h,r){ctx.beginPath();ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath();}
+function rects(count){if(state.layout==='spotlight')return Array.from({length:count},(_,i)=>i===0?{x:0,y:0,w:1280,h:720}:{x:1040,y:24+(i-1)*130,w:210,h:118});if(state.layout==='pip')return Array.from({length:count},(_,i)=>i===0?{x:0,y:0,w:1280,h:720}:{x:912,y:494-(i-1)*176,w:320,h:180});const c=Math.ceil(Math.sqrt(count||1)),r=Math.ceil((count||1)/c),g=14,cw=(1280-g*(c+1))/c,ch=(720-g*(r+1))/r;return Array.from({length:count},(_,i)=>({x:g+(i%c)*(cw+g),y:g+Math.floor(i/c)*(ch+g),w:cw,h:ch}));}
+function loadImage(src,id){if(!src)return images.get(id)?.ready||null;const current=images.get(id);if(current?.src===src)return current.ready||null;const img=new Image();const entry={src,img,ready:current?.ready||null};img.onload=()=>{entry.ready=img;};img.onerror=()=>{entry.ready=current?.ready||null;};img.src=src;images.set(id,entry);return entry.ready;}
+async function pull(){try{const r=await fetch('/api/backend-program/${req.params.showId}/state?token=${encodeURIComponent(broadcast.renderToken)}&t='+Date.now(),{cache:'no-store'});if(r.ok)state=await r.json();}catch{}setTimeout(pull,83);}
+function drawMedia(src,rect){ctx.save();roundRect(rect.x,rect.y,rect.w,rect.h,12);ctx.clip();ctx.fillStyle='#0e1418';ctx.fillRect(rect.x,rect.y,rect.w,rect.h);const img=loadImage(src.frame,src.id);if(img&&img.naturalWidth){const scale=Math.max(rect.w/img.naturalWidth,rect.h/img.naturalHeight);const w=img.naturalWidth*scale,h=img.naturalHeight*scale;ctx.drawImage(img,rect.x+(rect.w-w)/2,rect.y+(rect.h-h)/2,w,h);}else{ctx.fillStyle='#2d8bb8';ctx.fillRect(rect.x,rect.y,rect.w,rect.h);ctx.fillStyle='#fff';ctx.font='800 64px Arial';ctx.textAlign='center';ctx.fillText((src.label||'SRC').slice(0,2).toUpperCase(),rect.x+rect.w/2,rect.y+rect.h/2);}ctx.restore();}
+function draw(){ctx.fillStyle='#050708';ctx.fillRect(0,0,1280,720);const visible=(state.sources||[]).filter(s=>s.visible!==false);const rs=rects(visible.length);visible.forEach((s,i)=>drawMedia(s,rs[i]));for(const overlay of state.overlays||[]){if(!overlay.enabled)continue;if(overlay.type==='browser'&&overlay.frame){const img=loadImage(overlay.frame,'overlay-'+overlay.id);if(img&&img.naturalWidth)ctx.drawImage(img,0,0,1280,720);}if(overlay.type==='template'){ctx.fillStyle='rgba(5,7,8,.86)';roundRect(420,610,440,58,12);ctx.fill();ctx.fillStyle=state.brand?.accent||'#bbc3ff';roundRect(436,622,112,34,8);ctx.fill();ctx.fillStyle='#06110e';ctx.font='800 17px Arial';ctx.fillText('LIVE',448,645);ctx.fillStyle='#fff';ctx.font='700 20px Arial';ctx.fillText(overlay.text||overlay.name||'',568,645,260);}}if(state.brand?.logo){ctx.fillStyle=state.brand.accent||'#bbc3ff';roundRect(32,28,88,46,8);ctx.fill();ctx.fillStyle='#06110e';ctx.font='800 24px Arial';ctx.fillText(String(state.brand.logo).toUpperCase(),50,58);}if(state.lowerThird?.enabled){ctx.fillStyle='rgba(5,7,8,.84)';roundRect(32,562,470,92,10);ctx.fill();ctx.fillStyle='#fff';ctx.font='800 34px Arial';ctx.fillText(state.lowerThird.name||'',64,606);ctx.fillStyle='rgba(255,255,255,.78)';ctx.font='500 20px Arial';ctx.fillText(state.lowerThird.title||'',64,636);}if(state.ticker?.enabled&&state.ticker.text){ctx.fillStyle='#bbc3ff';ctx.fillRect(0,668,1280,52);ctx.fillStyle='#06110e';ctx.font='800 24px Arial';const x=1280-((Date.now()/20)% (ctx.measureText(state.ticker.text).width+1400));ctx.fillText(state.ticker.text,x,702);}requestAnimationFrame(draw);}
+pull();draw();
+</script></body></html>`);
+});
+
+app.get("/api/backend-program/:showId/state", (req, res) => {
+  const broadcast = activeBroadcasts.get(req.params.showId);
+  if (!broadcast || broadcast.mode !== "backend-compositor" || req.query.token !== broadcast.renderToken) {
+    return res.status(404).json({ error: "Program state not available." });
+  }
+  res.json(broadcast.programState);
 });
 
 function redactDestination(destination) {
@@ -796,19 +851,49 @@ function createLiveKitToken({ identity, name, room, role, roomAdmin }) {
 
 server.on("upgrade", (request, socket, head) => {
   const url = new URL(request.url, `http://${request.headers.host}`);
-  if (url.pathname !== "/ingest") {
+  if (!["/ingest", "/source-ingest"].includes(url.pathname)) {
     socket.destroy();
     return;
   }
 
   try {
     const payload = jwt.verify(url.searchParams.get("token") || "", JWT_SECRET);
-    wss.handleUpgrade(request, socket, head, (ws) => {
-      wss.emit("connection", ws, request, payload);
+    const target = url.pathname === "/source-ingest" ? sourceWss : wss;
+    target.handleUpgrade(request, socket, head, (ws) => {
+      target.emit("connection", ws, request, payload);
     });
   } catch {
     socket.destroy();
   }
+});
+
+sourceWss.on("connection", (ws, _request, payload) => {
+  const broadcast = activeBroadcasts.get(payload.showId);
+  if (!broadcast || broadcast.ownerId !== payload.sub || broadcast.mode !== "backend-compositor") {
+    ws.close(1008, "Backend compositor broadcast not found");
+    return;
+  }
+  broadcast.sourceSocket = ws;
+  broadcast.lastChunkAt = Date.now();
+  logEvent("source-ingest.connected", { showId: payload.showId, ownerId: payload.sub });
+
+  ws.on("message", (chunk) => {
+    let message;
+    try {
+      message = JSON.parse(Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk));
+    } catch {
+      return;
+    }
+    broadcast.bytesIn += Buffer.byteLength(JSON.stringify(message));
+    broadcast.lastChunkAt = Date.now();
+    applyBackendProgramMessage(broadcast, message);
+  });
+
+  ws.on("close", () => {
+    logEvent("source-ingest.closed", { showId: payload.showId, bytesIn: broadcast.bytesIn });
+    if (broadcast.sourceSocket === ws) broadcast.sourceSocket = null;
+    markBroadcastInterrupted(broadcast, "Source feed disconnected.");
+  });
 });
 
 wss.on("connection", (ws, _request, payload) => {
@@ -911,6 +996,206 @@ function startBroadcast({ show, ownerId, destinations, ingestFormat = "webm", au
   };
 }
 
+function startBackendCompositorBroadcast({ show, ownerId, destinations, fps = 30, videoBitrate = 3500, audioBitrate = 128 }) {
+  const startedAt = now();
+  const renderToken = nanoid(32);
+  const relays = destinations.map((destination) => startBackendRelay(destination, { fps, videoBitrate, audioBitrate }));
+  const broadcast = {
+    mode: "backend-compositor",
+    showId: show.id,
+    ownerId,
+    startedAt,
+    relays,
+    fps,
+    videoBitrate,
+    audioBitrate,
+    bytesIn: 0,
+    lastChunkAt: Date.now(),
+    status: "starting",
+    renderToken,
+    captureTimer: null,
+    rendererPage: null,
+    sourceSocket: null,
+    programState: {
+      layout: "grid",
+      sources: [],
+      overlays: [],
+      ticker: { enabled: false, text: "" },
+      brand: { logo: "LIVE", accent: "#bbc3ff" },
+      lowerThird: null,
+      comment: null
+    }
+  };
+  launchBackendRenderer(broadcast).catch((error) => {
+    broadcast.status = "failed";
+    broadcast.relays.forEach((relay) => relay.errors.push(error.message));
+    logEvent("backend-compositor.error", { showId: show.id, error: error.message });
+  });
+  logEvent("backend-compositor.starting", { showId: show.id, ownerId, destinations: destinations.length, fps, videoBitrate, audioBitrate });
+  return broadcast;
+}
+
+function startBackendRelay(destination, options) {
+  const target = buildRtmpTarget(destination);
+  const effectiveFps = Math.min(Math.max(Number(options.fps) || 30, 5), 12);
+  const relay = {
+    destination,
+    destinationId: destination.id,
+    name: destination.name,
+    target: redactRtmpTarget(target),
+    rawTarget: target,
+    status: "starting",
+    errors: [],
+    process: null,
+    stopping: false
+  };
+  const args = [
+    "-hide_banner",
+    "-loglevel",
+    "warning",
+    "-fflags",
+    "+genpts",
+    "-f",
+    "image2pipe",
+    "-vcodec",
+    "mjpeg",
+    "-framerate",
+    String(effectiveFps),
+    "-i",
+    "pipe:0",
+    "-f",
+    "lavfi",
+    "-i",
+    "anullsrc=channel_layout=stereo:sample_rate=48000",
+    "-map",
+    "0:v:0",
+    "-map",
+    "1:a:0",
+    "-c:v",
+    "libx264",
+    "-preset",
+    "veryfast",
+    "-tune",
+    "zerolatency",
+    "-b:v",
+    `${options.videoBitrate}k`,
+    "-maxrate",
+    `${Math.round(options.videoBitrate * 1.15)}k`,
+    "-bufsize",
+    `${Math.round(options.videoBitrate * 2)}k`,
+    "-g",
+    String(effectiveFps * 2),
+    "-keyint_min",
+    String(effectiveFps),
+    "-force_key_frames",
+    "expr:gte(t,n_forced*2)",
+    "-sc_threshold",
+    "0",
+    "-pix_fmt",
+    "yuv420p",
+    "-c:a",
+    "aac",
+    "-b:a",
+    `${options.audioBitrate}k`,
+    "-shortest",
+    "-flvflags",
+    "no_duration_filesize",
+    "-f",
+    "flv",
+    target
+  ];
+  const process = spawn(FFMPEG_PATH, args, { stdio: ["pipe", "ignore", "pipe"] });
+  relay.process = process;
+  relay.status = "live";
+  process.stdin.on("error", (error) => {
+    relay.status = "failed";
+    relay.errors.push(error.message);
+    relay.errors = relay.errors.slice(-5);
+    logEvent("backend-relay.stdin.error", { destinationId: relay.destinationId, name: relay.name, error: error.message });
+  });
+  process.stderr.on("data", (data) => {
+    relay.status = "warning";
+    const message = data.toString().trim();
+    relay.errors.push(message);
+    relay.errors = relay.errors.slice(-5);
+    logEvent("backend-relay.stderr", { destinationId: relay.destinationId, name: relay.name, message });
+  });
+  process.on("exit", (code) => {
+    relay.status = relay.stopping ? "ended" : "failed";
+    relay.errors.push(`Backend relay exited with code ${code}.`);
+    relay.errors = relay.errors.slice(-5);
+    logEvent("backend-relay.exited", { destinationId: relay.destinationId, name: relay.name, code, stopping: relay.stopping });
+  });
+  logEvent("backend-relay.spawned", { destinationId: relay.destinationId, name: relay.name, target: relay.target, requestedFps: options.fps, fps: effectiveFps, videoBitrate: options.videoBitrate });
+  return relay;
+}
+
+async function launchBackendRenderer(broadcast) {
+  const browser = await getBrowserRenderer();
+  const page = await browser.newPage();
+  broadcast.rendererPage = page;
+  await page.setViewport({ width: 1280, height: 720, deviceScaleFactor: 1 });
+  await page.goto(`http://127.0.0.1:${PORT}/backend-program/${broadcast.showId}?token=${encodeURIComponent(broadcast.renderToken)}`, {
+    waitUntil: "domcontentloaded"
+  });
+  broadcast.status = "live";
+  const captureFps = Math.min(Math.max(Number(broadcast.fps) || 30, 5), 12);
+  const interval = Math.max(83, Math.round(1000 / captureFps));
+  broadcast.captureTimer = setInterval(async () => {
+    if (broadcast.status !== "live") return;
+    const msSinceLastChunk = Date.now() - (broadcast.lastChunkAt || Date.now());
+    if (!broadcast.sourceSocket || msSinceLastChunk > SOURCE_STALL_MS) {
+      markBroadcastInterrupted(broadcast, !broadcast.sourceSocket ? "Source feed disconnected." : "Source feed timed out.");
+      return;
+    }
+    if (broadcast.captureBusy) return;
+    broadcast.captureBusy = true;
+    try {
+      const dataUrl = await page.evaluate(() => document.getElementById("program")?.toDataURL("image/jpeg", 0.82) || "");
+      const frame = Buffer.from(dataUrl.replace(/^data:image\/jpeg;base64,/, ""), "base64");
+      if (!frame.length) return;
+      for (const relay of broadcast.relays) {
+        if (relay.stopping || !relay.process || relay.process.stdin.destroyed || relay.process.killed) continue;
+        if (relay.process.stdin.writableLength > 12 * 1024 * 1024) continue;
+        relay.process.stdin.write(frame);
+      }
+    } catch (error) {
+      logEvent("backend-compositor.capture.error", { showId: broadcast.showId, error: error.message });
+    } finally {
+      broadcast.captureBusy = false;
+    }
+  }, interval);
+  logEvent("backend-compositor.live", { showId: broadcast.showId, requestedFps: broadcast.fps, fps: captureFps });
+}
+
+function applyBackendProgramMessage(broadcast, message) {
+  if (message.type === "program-state") {
+    broadcast.programState = {
+      ...broadcast.programState,
+      ...message.state,
+      sources: broadcast.programState.sources
+    };
+    return;
+  }
+  if (message.type === "source-frame") {
+    const source = {
+      id: String(message.id || ""),
+      label: String(message.label || "Source"),
+      kind: String(message.kind || "source"),
+      visible: message.visible !== false,
+      frame: String(message.frame || "")
+    };
+    if (!source.id || !source.frame.startsWith("data:image/")) return;
+    const existingIndex = broadcast.programState.sources.findIndex((item) => item.id === source.id);
+    if (existingIndex >= 0) {
+      broadcast.programState.sources[existingIndex] = { ...broadcast.programState.sources[existingIndex], ...source };
+    } else {
+      broadcast.programState.sources.push(source);
+    }
+    broadcast.programState.sources = broadcast.programState.sources.slice(-12);
+  }
+}
+
 function startRelay(destination, options = {}) {
   const target = buildRtmpTarget(destination);
   const relay = {
@@ -1008,6 +1293,8 @@ function launchRelayProcess(relay) {
     String(relay.fps * 2),
     "-sc_threshold",
     "0",
+    "-r",
+    String(relay.fps),
     "-fps_mode",
     "cfr",
     "-pix_fmt",
@@ -1071,6 +1358,18 @@ function launchRelayProcess(relay) {
     }
     relay.status = "reconnecting";
     relay.exitCode = code;
+    if (relay.ingestFormat === "webm") {
+      relay.status = "failed";
+      relay.errors.push("Relay exited; WebM ingest cannot reconnect mid-stream. Stop and start Go Live to begin a fresh encoder session.");
+      relay.errors = relay.errors.slice(-5);
+      logEvent("relay.restart.skipped", {
+        destinationId: relay.destinationId,
+        name: relay.name,
+        ingestFormat: relay.ingestFormat,
+        reason: "webm_midstream_restart_unsupported"
+      });
+      return;
+    }
     relay.errors.push(`Relay exited with code ${code}; reconnecting.`);
     relay.errors = relay.errors.slice(-5);
     logEvent("relay.exited", { destinationId: relay.destinationId, name: relay.name, code, stopping: false });
@@ -1152,7 +1451,15 @@ function finishBroadcast(showId) {
   const broadcast = activeBroadcasts.get(showId);
   if (!broadcast) return;
   broadcast.status = "ended";
-  broadcast.recording.end();
+  if (broadcast.captureTimer) clearInterval(broadcast.captureTimer);
+  broadcast.captureTimer = null;
+  if (broadcast.sourceSocket && broadcast.sourceSocket.readyState === broadcast.sourceSocket.OPEN) {
+    broadcast.sourceSocket.close();
+  }
+  if (broadcast.rendererPage) {
+    broadcast.rendererPage.close().catch(() => {});
+  }
+  if (broadcast.recording) broadcast.recording.end();
   for (const relay of broadcast.relays) {
     relay.stopping = true;
     if (relay.restartTimer) clearTimeout(relay.restartTimer);
@@ -1162,15 +1469,17 @@ function finishBroadcast(showId) {
   }
 
   const db = readDb();
-  db.recordings.unshift({
-    id: nanoid(),
-    ownerId: broadcast.ownerId,
-    showId,
-    url: broadcast.recordingUrl,
-    path: broadcast.recordingPath,
-    bytesIn: broadcast.bytesIn,
-    createdAt: now()
-  });
+  if (broadcast.recordingUrl) {
+    db.recordings.unshift({
+      id: nanoid(),
+      ownerId: broadcast.ownerId,
+      showId,
+      url: broadcast.recordingUrl,
+      path: broadcast.recordingPath,
+      bytesIn: broadcast.bytesIn,
+      createdAt: now()
+    });
+  }
   const show = db.shows.find((item) => item.id === showId);
   if (show && show.status === "live") {
     show.status = "ended";
@@ -1184,11 +1493,44 @@ function stopBroadcast(showId) {
   finishBroadcast(showId);
 }
 
+function markBroadcastInterrupted(broadcast, reason) {
+  if (!broadcast || ["ended", "interrupted", "failed"].includes(broadcast.status)) return;
+  broadcast.status = "interrupted";
+  broadcast.interruptReason = reason;
+  if (broadcast.captureTimer) clearInterval(broadcast.captureTimer);
+  broadcast.captureTimer = null;
+  if (broadcast.sourceSocket && broadcast.sourceSocket.readyState === broadcast.sourceSocket.OPEN) {
+    broadcast.sourceSocket.close();
+  }
+  broadcast.sourceSocket = null;
+  if (broadcast.rendererPage) {
+    broadcast.rendererPage.close().catch(() => {});
+    broadcast.rendererPage = null;
+  }
+  for (const relay of broadcast.relays) {
+    relay.stopping = true;
+    relay.status = relay.status === "failed" ? "failed" : "interrupted";
+    relay.errors.push(reason);
+    relay.errors = relay.errors.slice(-5);
+    if (relay.process && !relay.process.stdin.destroyed) relay.process.stdin.end();
+  }
+  const db = readDb();
+  const show = db.shows.find((item) => item.id === broadcast.showId);
+  if (show && ["live", "starting"].includes(show.status)) {
+    show.status = "interrupted";
+    show.updatedAt = now();
+    writeDb(db);
+  }
+  logEvent("broadcast.interrupted", { showId: broadcast.showId, reason, bytesIn: broadcast.bytesIn });
+}
+
 function summarizeBroadcast(broadcast) {
   const msSinceLastChunk = Date.now() - (broadcast.lastChunkAt || Date.now());
-  const stalled = broadcast.bytesIn > 0 && msSinceLastChunk > 10000;
+  const stalled = broadcast.status === "live" && msSinceLastChunk > SOURCE_STALL_MS;
   return {
     status: stalled ? "stalled" : broadcast.status,
+    reason: broadcast.interruptReason,
+    mode: broadcast.mode || "browser-ingest",
     showId: broadcast.showId,
     startedAt: broadcast.startedAt,
     bytesIn: broadcast.bytesIn,
